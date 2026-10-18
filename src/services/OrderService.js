@@ -1,121 +1,54 @@
 const ProductRepository = require("../repositories/ProductRepository");
 const OrderRepository = require("../repositories/OrderRepository");
-const NotificationService = require("./NotificationService");
 const Logger = require("../utils/Logger");
+const DiscountCalculator = require("./DiscountCalculator");
+const FreightCalculator = require("./FreightCalculator");
+const PaymentProcessor = require("./PaymentProcessor");
+const OrderValidator = require("./OrderValidator");
+
+let NotificationService;
+try {
+  NotificationService = require("./NotificationService");
+} catch {
+  NotificationService = require("../services/NotificationService");
+}
 
 class OrderService {
-  constructor() {
-    this.productRepository = new ProductRepository();
-    this.orderRepository = new OrderRepository();
-    this.notificationService = new NotificationService();
-    this.logger = new Logger();
+  constructor(
+    productRepository = new ProductRepository(),
+    orderRepository = new OrderRepository(),
+    notificationService = new NotificationService(),
+    logger = new Logger(),
+    discountCalculator = new DiscountCalculator(),
+    freightCalculator = new FreightCalculator(),
+    paymentProcessor = new PaymentProcessor(),
+    validator = null
+  ) {
+    this.productRepository = productRepository;
+    this.orderRepository = orderRepository;
+    this.notificationService = notificationService;
+    this.logger = logger;
+    this.discountCalculator = discountCalculator;
+    this.freightCalculator = freightCalculator;
+    this.paymentProcessor = paymentProcessor;
+    this.validator = validator || new OrderValidator(this.productRepository);
   }
 
   process(order) {
     this.logger.info(`Iniciando processamento do pedido ${order.id}.`);
 
-    if (!order.customer) {
-      throw new Error("Cliente obrigatorio.");
-    }
+    this.validator.validate(order);
 
-    if (!order.customer.email || !order.customer.email.includes("@")) {
-      throw new Error("E-mail do cliente invalido.");
-    }
+    const subtotal = order.calculateSubtotal ? order.calculateSubtotal() : this._calculateSubtotal(order);
+    const totalWeight = order.calculateTotalWeight ? order.calculateTotalWeight() : this._calculateTotalWeight(order);
 
-    if (!order.items || order.items.length === 0) {
-      throw new Error("Pedido sem itens.");
-    }
-
-    for (const item of order.items) {
-      if (!item.product) {
-        throw new Error("Item sem produto.");
-      }
-
-      if (item.quantity <= 0) {
-        throw new Error("Quantidade invalida.");
-      }
-
-      const product = this.productRepository.findById(item.product.id);
-
-      if (!product) {
-        throw new Error(`Produto ${item.product.id} nao encontrado.`);
-      }
-
-      if (product.stock < item.quantity) {
-        throw new Error(`Estoque insuficiente para ${product.name}.`);
-      }
-    }
-
-    let subtotal = 0;
-
-    for (const item of order.items) {
-      subtotal += item.product.price * item.quantity;
-    }
-
-    let discount = 0;
-
-    if (order.customer.type === "vip") {
-      discount += subtotal * 0.08;
-    }
-
-    if (order.customer.type === "employee") {
-      discount += subtotal * 0.15;
-    }
-
-    if (order.couponCode === "TECH10") {
-      discount += subtotal * 0.1;
-    }
-
-    if (order.couponCode === "FRETEGRATIS") {
-      discount += 0;
-    }
-
-    if (subtotal > 8000) {
-      discount += 250;
-    }
-
-    let totalWeight = 0;
-
-    for (const item of order.items) {
-      totalWeight += item.product.weight * item.quantity;
-    }
-
-    let freight = 0;
-
-    if (order.customer.address.region === "sudeste") {
-      freight = 20 + totalWeight * 4;
-    } else if (order.customer.address.region === "sul") {
-      freight = 28 + totalWeight * 5;
-    } else if (order.customer.address.region === "centro-oeste") {
-      freight = 35 + totalWeight * 6;
-    } else if (order.customer.address.region === "nordeste") {
-      freight = 45 + totalWeight * 7;
-    } else if (order.customer.address.region === "norte") {
-      freight = 60 + totalWeight * 9;
-    } else {
-      freight = 50 + totalWeight * 8;
-    }
-
-    if (order.couponCode === "FRETEGRATIS") {
-      freight = 0;
-    }
-
-    let paymentFee = 0;
-    let paymentStatus = "pending";
-
-    if (order.paymentMethod === "pix") {
-      paymentStatus = "approved";
-      discount += subtotal * 0.03;
-    } else if (order.paymentMethod === "credit_card") {
-      if (order.installments > 1) {
-        paymentFee = subtotal * 0.025;
-      }
-      paymentStatus = "approved";
-    } else if (order.paymentMethod === "boleto") {
-      paymentStatus = "waiting_payment";
-    } else {
-      throw new Error("Forma de pagamento invalida.");
-    }
+    const discount = this.discountCalculator.calculate(order, subtotal);
+    const freight = this.freightCalculator.calculate(order, totalWeight);
+    const { paymentFee, paymentStatus } = this.paymentProcessor.process(
+      order.paymentMethod,
+      order.installments,
+      subtotal
+    );
 
     const total = Number((subtotal - discount + freight + paymentFee).toFixed(2));
 
@@ -131,15 +64,15 @@ class OrderService {
 
     const orderSummary = {
       id: order.id,
-      customerName: order.customer.name,
-      customerEmail: order.customer.email,
-      city: order.customer.address.city,
-      state: order.customer.address.state,
+      customerName: order.getCustomerName ? order.getCustomerName() : order.customer.name,
+      customerEmail: order.getCustomerEmail ? order.getCustomerEmail() : order.customer.email,
+      city: order.getCustomerCity ? order.getCustomerCity() : order.customer.address.city,
+      state: order.getCustomerState ? order.getCustomerState() : order.customer.address.state,
       items: order.items.map((item) => ({
         productId: item.product.id,
         name: item.product.name,
         quantity: item.quantity,
-        subtotal: item.getSubtotal()
+        subtotal: item.getSubtotal ? item.getSubtotal() : item.product.price * item.quantity
       })),
       subtotal,
       discount: Number(discount.toFixed(2)),
@@ -159,17 +92,29 @@ class OrderService {
       this.logger.warn(`Pedido ${order.id} aguardando pagamento.`);
     }
 
-    console.log("Resumo do pedido");
-    console.log(`Cliente: ${order.customer.name}`);
-    console.log(`Cidade: ${order.customer.address.city}/${order.customer.address.state}`);
-    console.log(`Itens: ${order.getTotalItems()}`);
-    console.log(`Subtotal: R$ ${subtotal.toFixed(2)}`);
-    console.log(`Desconto: R$ ${discount.toFixed(2)}`);
-    console.log(`Frete: R$ ${freight.toFixed(2)}`);
-    console.log(`Taxas: R$ ${paymentFee.toFixed(2)}`);
-    console.log(`Total: R$ ${total.toFixed(2)}`);
+    this._printSummary(orderSummary, order);
 
     return orderSummary;
+  }
+
+  _calculateSubtotal(order) {
+    return order.items.reduce((sum, item) => sum + item.product.price * item.quantity, 0);
+  }
+
+  _calculateTotalWeight(order) {
+    return order.items.reduce((sum, item) => sum + item.product.weight * item.quantity, 0);
+  }
+
+  _printSummary(summary, order) {
+    console.log("Resumo do pedido");
+    console.log(`Cliente: ${summary.customerName}`);
+    console.log(`Cidade: ${summary.city}/${summary.state}`);
+    console.log(`Itens: ${order.getTotalItems ? order.getTotalItems() : summary.items.length}`);
+    console.log(`Subtotal: R$ ${summary.subtotal.toFixed(2)}`);
+    console.log(`Desconto: R$ ${summary.discount.toFixed(2)}`);
+    console.log(`Frete: R$ ${summary.freight.toFixed(2)}`);
+    console.log(`Taxas: R$ ${summary.paymentFee.toFixed(2)}`);
+    console.log(`Total: R$ ${summary.total.toFixed(2)}`);
   }
 }
 
