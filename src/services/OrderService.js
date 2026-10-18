@@ -5,13 +5,7 @@ const DiscountCalculator = require("./DiscountCalculator");
 const FreightCalculator = require("./FreightCalculator");
 const PaymentProcessor = require("./PaymentProcessor");
 const OrderValidator = require("./OrderValidator");
-
-let NotificationService;
-try {
-  NotificationService = require("./NotificationService");
-} catch {
-  NotificationService = require("../services/NotificationService");
-}
+const NotificationService = require("./NotificationService");
 
 class OrderService {
   constructor(
